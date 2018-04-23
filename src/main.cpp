@@ -8,6 +8,11 @@
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 
+#include <Adafruit_BME280.h>
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+Adafruit_BME280 bme; // I2C
+
 #define BAUD_RATE 115200
 #define TEMP_MIN 31
 #define HUM_SUELO 70
@@ -81,11 +86,6 @@ void setup() {
     lcd.backlight();
     lcd.setCursor(0,0);
 
-    //setup_wifi();
-
-    client.setServer(mqtt_server, 1883);
-    client.setCallback(callback);
-
     Wire.begin();
 
     dht.begin(); // Iniciar sensor DHT11
@@ -94,9 +94,21 @@ void setup() {
     //Pin de la valvula y del extractor establecidos como pines de salida
     pinMode(PINVALVULA, OUTPUT); //
     pinMode (PINEXTRACTOR, OUTPUT);
+    bool status;
 
-    Serial.print("Free Heap[B]: ");
-    Serial.println(ESP.getFreeHeap());
+    // default settings
+    // (you can also pass in a Wire library object like &Wire2)
+    status = bme.begin();
+    if (!status) {
+        Serial.println("Could not find a valid BME280 sensor, check wiring!");
+        while (1);
+    }
+
+    setup_wifi();
+
+    client.setServer(mqtt_server, 1883);
+    client.setCallback(callback);
+
 }
 
 void setup_wifi() {
@@ -318,6 +330,25 @@ void mostrarDatos(){
   lcd.print("HS:");
   lcd.print(porcHs);
   lcd.print("%");
+
+  Serial.print("Temperature = ");
+  Serial.print(bme.readTemperature());
+  Serial.println(" *C");
+
+  Serial.print("Pressure = ");
+
+  Serial.print(bme.readPressure() / 100.0F);
+  Serial.println(" hPa");
+
+  Serial.print("Approx. Altitude = ");
+  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
+  Serial.println(" m");
+
+  Serial.print("Humidity = ");
+  Serial.print(bme.readHumidity());
+  Serial.println(" %");
+
+
 
 }
 
