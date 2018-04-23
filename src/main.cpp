@@ -2,15 +2,19 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h> // Libreria necesaria para el sensor de Humedad y temperatura
 #include <DHT_U.h> // Libreria sensor de Humedad y temperatura
-#include "DHT.h" // Libreria sensor de Humedad y temperatura
 #include <BH1750.h>  // Libreria sensor de Luz
 #include <LiquidCrystal_I2C.h> // Libreria LCD
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
-#include <ESP8266mDNS.h>
 #include <PubSubClient.h>
 
 #define BAUD_RATE 115200
+#define TEMP_MIN 31
+#define HUM_SUELO 70
+#define TOPIC_AUTO "/v1.6/devices/invernadero3/auto/lv"
+#define TOPIC_INVERNADERO "/v1.6/devices/invernadero3"
+#define TOPIC_EXTRACTOR "/v1.6/devices/invernadero3/extractor/lv"
+#define TOPIC_VALVULA "/v1.6/devices/invernadero3/valvula/lv"
 
 const char *mqtt_server = "things.ubidots.com";
 
@@ -23,15 +27,10 @@ const char *str_status[] = {"WL_IDLE_STATUS",    "WL_NO_SSID_AVAIL",
 
 // provide text for the WiFi mode
 const char *str_mode[] = {"WIFI_OFF", "WIFI_STA", "WIFI_AP", "WIFI_AP_STA"};
+int disconnected = 0;
 WiFiClient espClient;
 PubSubClient client(espClient);
-MDNSResponder mdns;
-bool dnsConnection = false;
-unsigned long startTime = millis();
-void telnetHandle();
 
-WiFiServer telnetServer(23);
-WiFiClient serverClient;
 
 // Senseor de humedad y temperatura DHT11
 #define DHTPIN D5 // Se define el pin de lectura de datos
@@ -56,16 +55,22 @@ bool valvula_estado = false;
 #define PINEXTRACTOR D4 // asignacion de pin como salida para extractor NEGRO
 bool extractor_estado = false;
 
+bool automatico = true;
+
 LiquidCrystal_I2C lcd(0x3f,16,2); // Direccion LCD y Dimencion de LCD
 
 void setup_wifi();
 void sensarDatos(); // Función que obtiene los datos sensados por los sensores.
 void mostrarDatos(); // Función que muestra los datos en el lcd
 void riegoAutomatico(); // Función que activa las valvulas dependiendo de los valores sensados.
+void controlValvula(int hs);
+void controlExtractor(int t);
 void codificarJSON(int h, int t, int porcHs, uint16_t lux);
 void reconnect();
 void callback(char *topic, byte *payload, unsigned int length);
 
+float conteo;
+bool first;
 
 void setup() {
     Serial.begin(BAUD_RATE);
@@ -76,10 +81,8 @@ void setup() {
     lcd.backlight();
     lcd.setCursor(0,0);
 
-    setup_wifi();
-    if (mdns.begin(dns, WiFi.localIP())) {
-      dnsConnection = true;
-    }
+    //setup_wifi();
+
     client.setServer(mqtt_server, 1883);
     client.setCallback(callback);
 
@@ -91,10 +94,6 @@ void setup() {
     //Pin de la valvula y del extractor establecidos como pines de salida
     pinMode(PINVALVULA, OUTPUT); //
     pinMode (PINEXTRACTOR, OUTPUT);
-
-    telnetServer.begin();
-    telnetServer.setNoDelay(true);
-    Serial.println("Please connect Telnet Client, exit with ^] and 'quit'");
 
     Serial.print("Free Heap[B]: ");
     Serial.println(ESP.getFreeHeap());
@@ -112,12 +111,16 @@ void setup_wifi() {
   lcd.print("a la red WiFi...");
 
   WiFiManager wifiManager;
+  wifiManager.setTimeout(180);
 
   if (!wifiManager.autoConnect("Invernadero AP")) {
     Serial.println("failed to connect and hit timeout");
     // reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(1000);
+    //ESP.reset();
+    //delay(1000);
+    disconnected = 0;
+  }else{
+    disconnected = 1;
   }
 
   Serial.println("WiFi connected");
@@ -126,67 +129,82 @@ void setup_wifi() {
   lcd.print("WiFi Conectado");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
-}
 
-void callback(char *topic, byte *payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
+
 }
 
 void loop() {
 
-  telnetHandle();
-  if (!client.connected()) {
+  if(WiFi.status()==WL_CONNECTED){
+    disconnected = 0;
+  }else{
+    disconnected = 1;
+  }
+
+  if (!client.connected()&&disconnected==1) {
     reconnect();
   }
-  client.loop();
+
+  if(disconnected==1){
+      client.loop();
+  }
+
 
   sensarDatos();
   mostrarDatos();
-  riegoAutomatico();
-  delay(1000);
+  if(automatico){
+      riegoAutomatico();
+  }
+  delay(500);
 
+  if(first==true){
+    conteo+=0.5;
+  }
 }
 
-bool mensaje = false;
-void telnetHandle() {
-  if (telnetServer.hasClient()) {
-    if (!serverClient || !serverClient.connected()) {
-      if (serverClient) {
-        serverClient.stop();
-        Serial.println("Telnet Client Stop");
-      }
-      serverClient = telnetServer.available();
-      Serial.println("New Telnet client");
-      serverClient
-          .flush(); // clear input buffer, else you get strange characters
+void callback(char *topic, byte *payload, unsigned int length) {
+
+  String top = topic;
+
+  if(top==TOPIC_AUTO){
+    if(automatico==false&&(char)payload[0]=='1'){
+      Serial.print("Modo automatico activado");
+      automatico =  true;
+    }else if(automatico==true&&(char)payload[0]=='0'){
+      Serial.print("Modo automatico desactivado");
+      automatico =  false;
     }
-  }
 
-  while (serverClient.available()) { // get data from Client
-    Serial.write(serverClient.read());
-  }
+  }else if(top==TOPIC_EXTRACTOR&&automatico==false){
 
-  if (!mensaje) { // run every 2000 ms
-    startTime = millis();
-
-    if (serverClient && serverClient.connected()) { // send data to Client
-      serverClient.println("Conectado por telnet.");
-      if (WiFi.status() == WL_CONNECTED) {
-        serverClient.println("Conectado a: ");
-        serverClient.println(WiFi.localIP());
-      }
-      if (client.connected()) {
-        serverClient.println("Conectado a MQTT");
-      }
-      if (dnsConnection) {
-        serverClient.println("Se logró establecer el dns");
-      }
-      mensaje = true;
+    if((char)payload[0]=='1' && extractor_estado==false && valvula_estado==false){
+      digitalWrite (PINEXTRACTOR, HIGH ) ;
+      extractor_estado = true;
+      Serial.println("Extractor activado");
+    }else if((char)payload[0]=='0' && extractor_estado==true){
+      extractor_estado = false;
+      digitalWrite (PINEXTRACTOR, LOW ) ;
+      Serial.println("Extractor desactivado");
     }
+
+  }else if(top==TOPIC_VALVULA&&automatico==false){
+
+    if((char)payload[0]=='1' && valvula_estado==false && extractor_estado==false){
+      digitalWrite (PINVALVULA, HIGH ) ;
+      valvula_estado = true;
+      Serial.println("Valvula activada");
+      delay(3000);
+      valvula_estado = false;
+      digitalWrite (PINVALVULA, LOW ) ;
+      Serial.println("Valvula desactivada");
+    }else if((char)payload[0]=='0' && valvula_estado==true){
+      valvula_estado = false;
+      digitalWrite (PINVALVULA, LOW ) ;
+      Serial.println("Valvula desactivada");
+    }
+
   }
-  delay(10); // to avoid strange characters left in buffer
+
 }
 
 void reconnect() {
@@ -194,12 +212,22 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect, just a name to identify the client
-    if (client.connect("invernaderoClient","A1E-ZB0GWTu0Cfe4LjMnDpDfgJTk0NCPp1","")) {
+    if (client.connect("invernaderoClient","A1E-ZScJnTfGddjYY1sw2B64ppaBzORYss","")) {
       Serial.println("connected");
+
+      StaticJsonBuffer<200> jsonWrite;
+      JsonObject &write = jsonWrite.createObject();
+      write["auto"] = int(automatico);
+      String JSON;
+      write.printTo(JSON);
+      const char *payload = JSON.c_str();
+      client.publish("/v1.6/devices/invernadero2/auto", payload);
       // Once connected, publish an announcement...
       //client.publish("datos-invernadero","Conectado al servidor MQTT.");
       // ... and resubscribe
-      //client.subscribe("invernadero");
+      client.subscribe(TOPIC_EXTRACTOR);
+      client.subscribe(TOPIC_VALVULA);
+      client.subscribe(TOPIC_AUTO);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -210,40 +238,50 @@ void reconnect() {
   }
 }
 
-void codificarJSON(int h, int t, int porcHs, uint16_t lux){
-  StaticJsonBuffer<200> jsonWrite;
-  JsonObject &write = jsonWrite.createObject();
-
-  write["temperatura"] = t;
-  write["humedada"] = h;
-  write["luminosidad"] = lux;
-  write["humedads"] = porcHs;
-  write["valvula"] = digitalRead(PINVALVULA);
-  write["extractor"] = digitalRead(PINEXTRACTOR);
-
-  String JSON;
-  write.printTo(JSON);
-  const char *payload = JSON.c_str();
-
-  //Serial.println(payload);
-  //Se codifica y se publica el JSON con los datos recogidos
-  client.publish("/v1.6/devices/invernadero", payload);
-}
-
 void sensarDatos(){
+    if(dht.readHumidity()<=100){
+      h=dht.readHumidity(); //Humedad del aire
 
-    h=dht.readHumidity(); //Humedad del aire
-
-    t=dht.readTemperature(); // Temperatura
+      t=dht.readTemperature(); // Temperatura
+    }
 
     lux = lightMeter.readLightLevel(); // Intesidad luminica
 
-    //porcHs= map(analogRead(0), 0, 1024, 100, 0); // Humedad del suelo
-    //Serial.print(analogRead(0));
     porcHs = (analogRead(0) * 100) / 1024;
     porcHs = 100 - porcHs;
 
-    codificarJSON(h, t, porcHs, lux);
+    if(disconnected==1){
+        codificarJSON(h, t, porcHs, lux);
+    }
+
+ }
+
+ void codificarJSON(int h, int t, int porcHs, uint16_t lux){
+   StaticJsonBuffer<200> jsonWrite;
+   JsonObject &write = jsonWrite.createObject();
+
+   write["temperatura"] = t;
+   write["humedada"] = h;
+   write["luminosidad"] = lux;
+   write["humedads"] = porcHs;
+   //write["auto"] = automatico;
+   if(automatico==true || automatico==false&&extractor_estado==false&&valvula_estado==false){
+     write["valvula"] = digitalRead(PINVALVULA);
+     write["extractor"] = digitalRead(PINEXTRACTOR);
+   }else if(automatico==false&&extractor_estado==true){
+     write["valvula"] = digitalRead(PINVALVULA);
+   }else if(automatico==false&&valvula_estado==true){
+     write["extractor"] = digitalRead(PINEXTRACTOR);
+   }
+
+
+   String JSON;
+   write.printTo(JSON);
+   const char *payload = JSON.c_str();
+
+   //Serial.println(payload);
+   //Se codifica y se publica el JSON con los datos recogidos
+   client.publish(TOPIC_INVERNADERO, payload);
  }
 
 void mostrarDatos(){
@@ -283,32 +321,35 @@ void mostrarDatos(){
 
 }
 
+void riegoAutomatico(){
+  controlExtractor(t);
+  controlValvula(porcHs);
+}
+
 void controlValvula(int hs){
-  if(hs<90 && valvula_estado==false && extractor_estado==false){
+  if(hs<HUM_SUELO && valvula_estado==false && extractor_estado==false && (conteo>=60 || first==false) ){
     valvula_estado = true;
-    digitalWrite (PINVALVULA, HIGH ) ; //valvula se enciende si la humedad es menor al 90%
+    digitalWrite (PINVALVULA, HIGH ) ; //valvula se enciende si la humedad es menor al 70%
     Serial.println("Valvula activada");
-  }else if(hs>=90 && valvula_estado){
+    delay(3000);
     valvula_estado = false;
     digitalWrite (PINVALVULA, LOW) ; //valvula se mantiene apagaga
     Serial.println("Valvula desactivada");
-  }
+    conteo = 0;
+    if(first==false){
+      first = true;
+    }
+}
 }
 
 void controlExtractor(int t){
-  if(t>28 && extractor_estado==false && valvula_estado==false){
+  if(t>=TEMP_MIN && extractor_estado==false && valvula_estado==false){
     extractor_estado = true;
     digitalWrite (PINEXTRACTOR, HIGH);
     Serial.println("Extractor activado");
-  }else if(t<=28&extractor_estado){
+  }else if(t<=30&extractor_estado==true){
     extractor_estado = false;
     digitalWrite (PINEXTRACTOR, LOW);
     Serial.println("Extractor desactivado");
   }
-}
-
-void riegoAutomatico(){
-  controlExtractor(t);
-  controlValvula(porcHs);
-
 }
