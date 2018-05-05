@@ -8,22 +8,20 @@
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 
-#include <Adafruit_BME280.h>
+/* #include <Adafruit_BME280.h>
 #define SEALEVELPRESSURE_HPA (1013.25)
 
-Adafruit_BME280 bme; // I2C
+Adafruit_BME280 bme; // I2C */
 
 #define BAUD_RATE 115200
 #define TEMP_MIN 31
 #define HUM_SUELO 70
-#define TOPIC_AUTO "/v1.6/devices/invernadero3/auto/lv"
-#define TOPIC_INVERNADERO "/v1.6/devices/invernadero3"
-#define TOPIC_EXTRACTOR "/v1.6/devices/invernadero3/extractor/lv"
-#define TOPIC_VALVULA "/v1.6/devices/invernadero3/valvula/lv"
+#define TOPIC_AUTO "/v1.6/devices/invernadero/auto/lv"
+#define TOPIC_INVERNADERO "/v1.6/devices/invernadero"
+#define TOPIC_EXTRACTOR "/v1.6/devices/invernadero/extractor/lv"
+#define TOPIC_VALVULA "/v1.6/devices/invernadero/valvula/lv"
 
 const char *mqtt_server = "things.ubidots.com";
-
-const char *dns = "invernadero-01";
 
 const char *str_status[] = {"WL_IDLE_STATUS",    "WL_NO_SSID_AVAIL",
                             "WL_SCAN_COMPLETED", "WL_CONNECTED",
@@ -32,7 +30,7 @@ const char *str_status[] = {"WL_IDLE_STATUS",    "WL_NO_SSID_AVAIL",
 
 // provide text for the WiFi mode
 const char *str_mode[] = {"WIFI_OFF", "WIFI_STA", "WIFI_AP", "WIFI_AP_STA"};
-int disconnected = 0;
+bool disconnected = 0;
 WiFiClient espClient;
 PubSubClient client(espClient);
 
@@ -94,7 +92,8 @@ void setup() {
     //Pin de la valvula y del extractor establecidos como pines de salida
     pinMode(PINVALVULA, OUTPUT); //
     pinMode (PINEXTRACTOR, OUTPUT);
-    bool status;
+
+    /*bool status;
 
     // default settings
     // (you can also pass in a Wire library object like &Wire2)
@@ -102,7 +101,7 @@ void setup() {
     if (!status) {
         Serial.println("Could not find a valid BME280 sensor, check wiring!");
         while (1);
-    }
+    }*/
 
     setup_wifi();
 
@@ -130,9 +129,9 @@ void setup_wifi() {
     // reset and try again, or maybe put it to deep sleep
     //ESP.reset();
     //delay(1000);
-    disconnected = 0;
-  }else{
     disconnected = 1;
+  }else{
+    disconnected = 0;
   }
 
   Serial.println("WiFi connected");
@@ -153,11 +152,11 @@ void loop() {
     disconnected = 1;
   }
 
-  if (!client.connected()&&disconnected==1) {
+  if (!client.connected()&&disconnected==0) {
     reconnect();
   }
 
-  if(disconnected==1){
+  if(disconnected==0){
       client.loop();
   }
 
@@ -167,10 +166,10 @@ void loop() {
   if(automatico){
       riegoAutomatico();
   }
-  delay(500);
+  delay(10000);
 
   if(first==true){
-    conteo+=0.5;
+    conteo+=10;
   }
 }
 
@@ -182,9 +181,26 @@ void callback(char *topic, byte *payload, unsigned int length) {
     if(automatico==false&&(char)payload[0]=='1'){
       Serial.print("Modo automatico activado");
       automatico =  true;
+
+      StaticJsonBuffer<200> jsonWrite;
+      JsonObject &write = jsonWrite.createObject();
+      write["auto"] = int(automatico);
+      String JSON;
+      write.printTo(JSON);
+      const char *payload = JSON.c_str();
+      client.publish("/v1.6/devices/invernadero/auto", payload);
+
     }else if(automatico==true&&(char)payload[0]=='0'){
       Serial.print("Modo automatico desactivado");
       automatico =  false;
+
+      StaticJsonBuffer<200> jsonWrite;
+      JsonObject &write = jsonWrite.createObject();
+      write["auto"] = int(automatico);
+      String JSON;
+      write.printTo(JSON);
+      const char *payload = JSON.c_str();
+      client.publish("/v1.6/devices/invernadero/auto", payload);
     }
 
   }else if(top==TOPIC_EXTRACTOR&&automatico==false){
@@ -233,7 +249,7 @@ void reconnect() {
       String JSON;
       write.printTo(JSON);
       const char *payload = JSON.c_str();
-      client.publish("/v1.6/devices/invernadero2/auto", payload);
+      client.publish("/v1.6/devices/invernadero/auto", payload);
       // Once connected, publish an announcement...
       //client.publish("datos-invernadero","Conectado al servidor MQTT.");
       // ... and resubscribe
@@ -262,7 +278,7 @@ void sensarDatos(){
     porcHs = (analogRead(0) * 100) / 1024;
     porcHs = 100 - porcHs;
 
-    if(disconnected==1){
+    if(disconnected==0){
         codificarJSON(h, t, porcHs, lux);
     }
 
@@ -276,7 +292,6 @@ void sensarDatos(){
    write["humedada"] = h;
    write["luminosidad"] = lux;
    write["humedads"] = porcHs;
-   //write["auto"] = automatico;
    if(automatico==true || automatico==false&&extractor_estado==false&&valvula_estado==false){
      write["valvula"] = digitalRead(PINVALVULA);
      write["extractor"] = digitalRead(PINEXTRACTOR);
@@ -331,6 +346,7 @@ void mostrarDatos(){
   lcd.print(porcHs);
   lcd.print("%");
 
+  /*
   Serial.print("Temperature = ");
   Serial.print(bme.readTemperature());
   Serial.println(" *C");
@@ -346,7 +362,7 @@ void mostrarDatos(){
 
   Serial.print("Humidity = ");
   Serial.print(bme.readHumidity());
-  Serial.println(" %");
+  Serial.println(" %"); */
 
 
 
@@ -370,7 +386,7 @@ void controlValvula(int hs){
     if(first==false){
       first = true;
     }
-}
+  }
 }
 
 void controlExtractor(int t){
