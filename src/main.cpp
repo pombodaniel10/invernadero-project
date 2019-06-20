@@ -1,27 +1,40 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_Sensor.h> // Libreria necesaria para el sensor de Humedad y temperatura
-#include <DHT_U.h> // Libreria sensor de Humedad y temperatura
 #include <BH1750.h>  // Libreria sensor de Luz
 #include <LiquidCrystal_I2C.h> // Libreria LCD
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 
-/* #include <Adafruit_BME280.h>
+#include <Adafruit_BME280.h>
 #define SEALEVELPRESSURE_HPA (1013.25)
 
-Adafruit_BME280 bme; // I2C */
+Adafruit_BME280 bme; // I2C
+
+#define GREEN_LED D6
+#define RED_LED D7
+#define BLUE_LED D8
 
 #define BAUD_RATE 115200
-#define TEMP_MIN 31
-#define HUM_SUELO 70
-#define TOPIC_AUTO "/v1.6/devices/invernadero/auto/lv"
-#define TOPIC_INVERNADERO "/v1.6/devices/invernadero"
-#define TOPIC_EXTRACTOR "/v1.6/devices/invernadero/extractor/lv"
-#define TOPIC_VALVULA "/v1.6/devices/invernadero/valvula/lv"
+#define TEMP_MIN 15
+#define HUM_SUELO 80
+#define LUM_MIN 500
 
-const char *mqtt_server = "things.ubidots.com";
+/*
+#define PCF8591 (0x90 >> 1) // Dirreccion del bus I2C 1001 0000
+#define PCF8591_ACTIVAR_DAC 0x40  //0100 0000
+#define PCF8591_ADC0 0x00
+#define PCF8591_ADC1 0x01
+#define PCF8591_ADC2 0x02
+#define PCF8591_ADC3 0x03
+*/
+
+const char *mqtt_server = "mqtt.thingspeak.com";
+
+char mqttUserName[] = "TSArduinoMQTTDemo";  // Can be any name.
+char mqttPass[] = "3LFV5BSW05P9VU3G";  // Change this your MQTT API Key from Account > MyProfile.
+char writeAPIKey[] = "SV7Y0CX6PHT3CR9Y";    // Change to your channel Write API Key.
+long channelID = 541211;
 
 const char *str_status[] = {"WL_IDLE_STATUS",    "WL_NO_SSID_AVAIL",
                             "WL_SCAN_COMPLETED", "WL_CONNECTED",
@@ -34,21 +47,26 @@ bool disconnected = 0;
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+unsigned long lastConnectionTime = 0;
+const unsigned long postingInterval = 10L * 500L; // Post data every 5 seconds.
 
-// Senseor de humedad y temperatura DHT11
-#define DHTPIN D5 // Se define el pin de lectura de datos
-#define DHTTYPE DHT11  // Se define el tipo de sensor DHTs
-DHT dht(DHTPIN, DHTTYPE); // Se crea el objeto dht de tipo DHT
-int h; // Varible que recopila la humedad
-int t; // Variable que recopila la temperatura
+
+float h; // Varible que recopila la humedad
+float t; // Variable que recopila la temperatura
 
 //HIGRÓMETRO FC-28
 #define PINSUELO A0
 int porcHs; // Variable que recopila la humedad del suelo
+int porcHs2;
+int porcHs3;
 
 //Intesidad luminica
 BH1750 lightMeter; // Se creo un objeto de tipo BH1750 llamado lightMeter(Medidor de luz)
 uint16_t lux;
+
+float presion;
+
+float altitud;
 
 //Valvula
 #define PINVALVULA D3 // asignacion de pin como salida para valvula BLANCO
@@ -65,15 +83,13 @@ LiquidCrystal_I2C lcd(0x3f,16,2); // Direccion LCD y Dimencion de LCD
 void setup_wifi();
 void sensarDatos(); // Función que obtiene los datos sensados por los sensores.
 void mostrarDatos(); // Función que muestra los datos en el lcd
-void riegoAutomatico(); // Función que activa las valvulas dependiendo de los valores sensados.
 void controlValvula(int hs);
 void controlExtractor(int t);
-void codificarJSON(int h, int t, int porcHs, uint16_t lux);
+void codificarJSON(int h, int t, int porcHs, uint16_t lux,float presion, float altitud);
 void reconnect();
-void callback(char *topic, byte *payload, unsigned int length);
-
-float conteo;
-bool first;
+//void callback(char *topic, byte *payload, unsigned int length);
+void controlIL(uint16_t lux);
+int leerPCF8591_Pin(unsigned int pin);
 
 void setup() {
     Serial.begin(BAUD_RATE);
@@ -86,28 +102,48 @@ void setup() {
 
     Wire.begin();
 
-    dht.begin(); // Iniciar sensor DHT11
     lightMeter.begin(); // Iniciar sensor de Luz
 
     //Pin de la valvula y del extractor establecidos como pines de salida
     pinMode(PINVALVULA, OUTPUT); //
     pinMode (PINEXTRACTOR, OUTPUT);
 
-    /*bool status;
+    //Pines de la tira RGB
+    pinMode(RED_LED,OUTPUT);
+    pinMode(BLUE_LED,OUTPUT);
+    pinMode(GREEN_LED,OUTPUT);
 
-    // default settings
-    // (you can also pass in a Wire library object like &Wire2)
-    status = bme.begin();
-    if (!status) {
+    analogWriteFreq(500);
+    analogWriteRange(100);
+
+    if (!bme.begin()) {
         Serial.println("Could not find a valid BME280 sensor, check wiring!");
         while (1);
-    }*/
+    }
 
     setup_wifi();
 
     client.setServer(mqtt_server, 1883);
-    client.setCallback(callback);
+    //client.setCallback(callback);
 
+}
+
+void loop() {
+  // Reconnect if MQTT client is not connected.
+  if (!client.connected()){
+    reconnect();
+  }
+
+  client.loop();   // Call the loop continuously to establish connection to the server.
+
+  // If interval time has passed since the last connection, Publish data to ThingSpeak
+  if (millis() - lastConnectionTime > postingInterval){
+    sensarDatos();
+    mostrarDatos();
+    controlExtractor(t);
+    controlValvula(porcHs);
+    controlIL(lux);
+  }
 }
 
 void setup_wifi() {
@@ -144,35 +180,7 @@ void setup_wifi() {
 
 }
 
-void loop() {
-
-  if(WiFi.status()==WL_CONNECTED){
-    disconnected = 0;
-  }else{
-    disconnected = 1;
-  }
-
-  if (!client.connected()&&disconnected==0) {
-    reconnect();
-  }
-
-  if(disconnected==0){
-      client.loop();
-  }
-
-
-  sensarDatos();
-  mostrarDatos();
-  if(automatico){
-      riegoAutomatico();
-  }
-  delay(10000);
-
-  if(first==true){
-    conteo+=10;
-  }
-}
-
+/*
 void callback(char *topic, byte *payload, unsigned int length) {
 
   String top = topic;
@@ -234,81 +242,92 @@ void callback(char *topic, byte *payload, unsigned int length) {
   }
 
 }
+*/
 
 void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Attempt to connect, just a name to identify the client
-    if (client.connect("invernaderoClient","A1E-ZScJnTfGddjYY1sw2B64ppaBzORYss","")) {
-      Serial.println("connected");
+  char clientID[10];
 
-      StaticJsonBuffer<200> jsonWrite;
-      JsonObject &write = jsonWrite.createObject();
-      write["auto"] = int(automatico);
-      String JSON;
-      write.printTo(JSON);
-      const char *payload = JSON.c_str();
-      client.publish("/v1.6/devices/invernadero/auto", payload);
-      // Once connected, publish an announcement...
-      //client.publish("datos-invernadero","Conectado al servidor MQTT.");
-      // ... and resubscribe
-      client.subscribe(TOPIC_EXTRACTOR);
-      client.subscribe(TOPIC_VALVULA);
-      client.subscribe(TOPIC_AUTO);
-    } else {
+  // Loop until we're reconnected
+  while (!client.connected())
+  {
+    Serial.print("Attempting MQTT connection...");
+
+    // Connect to the MQTT broker
+    if (client.connect("invernaderoInedsor",mqttUserName,mqttPass))
+    {
+      Serial.println("connected");
+    } else
+    {
       Serial.print("failed, rc=");
+      // Print to know why the connection failed.
+      // See https://pubsubclient.knolleary.net/api.html#state for the failure code explanation.
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
       delay(5000);
     }
   }
 }
 
-void sensarDatos(){
-    if(dht.readHumidity()<=100){
-      h=dht.readHumidity(); //Humedad del aire
+/*
+int leerPCF8591_Pin(unsigned int pin){
+    Wire.beginTransmission(PCF8591);
+    Wire.write(pin);
+    Wire.endTransmission();
+    Wire.requestFrom(PCF8591, 2);
+    Wire.read();  // Se omite el primero porque es el valor anterior
+    int valor = (int) Wire.read();
+    valor = (valor*100)/1023;
+    valor = 100-valor;
+    return valor;
+}*/
 
-      t=dht.readTemperature(); // Temperatura
-    }
+void sensarDatos(){
 
     lux = lightMeter.readLightLevel(); // Intesidad luminica
 
-    porcHs = (analogRead(0) * 100) / 1024;
-    porcHs = 100 - porcHs;
+    porcHs = analogRead(A0);
+    porcHs = (porcHs*100)/1023;
+    porcHs = 100-porcHs;
+    //porcHs2 = leerPCF8591_Pin(PCF8591_ADC1);
+    //porcHs3 = leerPCF8591_Pin(PCF8591_ADC2);
+
+    presion = bme.readPressure() / 100.0F;
+    altitud = bme.readAltitude(SEALEVELPRESSURE_HPA);
+    t = bme.readTemperature();
+    h = bme.readHumidity();
 
     if(disconnected==0){
-        codificarJSON(h, t, porcHs, lux);
+        codificarJSON(h, t, porcHs,lux, presion, altitud);
     }
 
  }
 
- void codificarJSON(int h, int t, int porcHs, uint16_t lux){
-   StaticJsonBuffer<200> jsonWrite;
-   JsonObject &write = jsonWrite.createObject();
+ void codificarJSON(int h, int t, int porcHs, uint16_t lux, float presion, float altitud){
 
-   write["temperatura"] = t;
-   write["humedada"] = h;
-   write["luminosidad"] = lux;
-   write["humedads"] = porcHs;
-   if(automatico==true || automatico==false&&extractor_estado==false&&valvula_estado==false){
-     write["valvula"] = digitalRead(PINVALVULA);
-     write["extractor"] = digitalRead(PINEXTRACTOR);
-   }else if(automatico==false&&extractor_estado==true){
-     write["valvula"] = digitalRead(PINVALVULA);
-   }else if(automatico==false&&valvula_estado==true){
-     write["extractor"] = digitalRead(PINEXTRACTOR);
-   }
+   // Create data string to send to ThingSpeak
+  String data = String(
+                  "field1=" + String(t, DEC)
+                + "&field2=" + String(h, DEC)
+                + "&field3=" + String(porcHs, DEC)
+                + "&field4=" + String(lux, DEC)
+                + "&field5=" + String(presion, DEC)
+              );
 
+  int length = data.length();
+  char msgBuffer[length];
+  data.toCharArray(msgBuffer,length+1);
+  Serial.println(msgBuffer);
 
-   String JSON;
-   write.printTo(JSON);
-   const char *payload = JSON.c_str();
+  // Create a topic string and publish data to ThingSpeak channel feed.
+  String topicString ="channels/" + String( channelID ) + "/publish/"+String(writeAPIKey);
+  length=topicString.length();
+  char topicBuffer[length];
+  topicString.toCharArray(topicBuffer,length+1);
 
-   //Serial.println(payload);
-   //Se codifica y se publica el JSON con los datos recogidos
-   client.publish(TOPIC_INVERNADERO, payload);
+  client.publish( topicBuffer, msgBuffer );
+
+  lastConnectionTime = millis();
+
  }
 
 void mostrarDatos(){
@@ -342,39 +361,30 @@ void mostrarDatos(){
   Serial.print("HS: ");
   Serial.print(porcHs);
   Serial.print("\n\n");
+
+  /*Serial.print("HS 2: ");
+  Serial.print(porcHs2);
+  Serial.print("\n\n");
+
+  Serial.print("HS 3: ");
+  Serial.print(porcHs3);
+  Serial.print("\n\n"); */
   lcd.print("HS:");
   lcd.print(porcHs);
   lcd.print("%");
 
-  /*
-  Serial.print("Temperature = ");
-  Serial.print(bme.readTemperature());
-  Serial.println(" *C");
-
   Serial.print("Pressure = ");
-
-  Serial.print(bme.readPressure() / 100.0F);
+  Serial.print(presion);
   Serial.println(" hPa");
 
   Serial.print("Approx. Altitude = ");
-  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
+  Serial.print(altitud);
   Serial.println(" m");
 
-  Serial.print("Humidity = ");
-  Serial.print(bme.readHumidity());
-  Serial.println(" %"); */
-
-
-
-}
-
-void riegoAutomatico(){
-  controlExtractor(t);
-  controlValvula(porcHs);
 }
 
 void controlValvula(int hs){
-  if(hs<HUM_SUELO && valvula_estado==false && extractor_estado==false && (conteo>=60 || first==false) ){
+  if(hs<HUM_SUELO && valvula_estado==false && extractor_estado==false){
     valvula_estado = true;
     digitalWrite (PINVALVULA, HIGH ) ; //valvula se enciende si la humedad es menor al 70%
     Serial.println("Valvula activada");
@@ -382,10 +392,6 @@ void controlValvula(int hs){
     valvula_estado = false;
     digitalWrite (PINVALVULA, LOW) ; //valvula se mantiene apagaga
     Serial.println("Valvula desactivada");
-    conteo = 0;
-    if(first==false){
-      first = true;
-    }
   }
 }
 
@@ -394,9 +400,21 @@ void controlExtractor(int t){
     extractor_estado = true;
     digitalWrite (PINEXTRACTOR, HIGH);
     Serial.println("Extractor activado");
-  }else if(t<=30&extractor_estado==true){
+  }else if(t<=TEMP_MIN&extractor_estado==true){
     extractor_estado = false;
     digitalWrite (PINEXTRACTOR, LOW);
     Serial.println("Extractor desactivado");
   }
 }
+
+void controlIL(uint16_t lux){
+    if(lux<LUM_MIN){
+      analogWrite(RED_LED, 62);
+      analogWrite(GREEN_LED,6);
+      analogWrite(BLUE_LED, 148);
+    }else{
+      analogWrite(RED_LED, 0);
+      analogWrite(BLUE_LED, 0);
+      analogWrite(GREEN_LED,0);
+    }
+  }

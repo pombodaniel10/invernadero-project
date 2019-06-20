@@ -1,0 +1,6 @@
+{
+    "terminal.integrated.env.linux": {
+        "PATH": "/home/ktank16/.platformio/penv/bin:/home/ktank16/.platformio/penv:/home/ktank16/.local/bin:/home/ktank16/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/ktank16/Android/Sdk/tools:/home/ktank16/Android/Sdk/platform_tools:/home/ktank16/Documentos/android-studio/gradle/gradle-4.4/bin",
+        "PLATFORMIO_CALLER": "vscode"
+    }
+}
